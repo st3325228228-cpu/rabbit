@@ -1,10 +1,10 @@
 """
-台股技術分析儀表板 ── Streamlit 版本
-依賴：pip install streamlit yfinance plotly pandas numpy
+台股技術分析儀表板 ── Streamlit 完整進階版
+依賴：pip install streamlit yfinance plotly pandas numpy requests
 執行：streamlit run stock_dashboard_streamlit.py
 """
 
-import warnings, math
+import warnings, math, io, requests
 warnings.filterwarnings("ignore")
 
 import streamlit as st
@@ -22,7 +22,7 @@ st.set_page_config(
     page_title="台股技術分析儀表板",
     page_icon="📈",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
 # ══════════════════════════════════════════════════════════════════
@@ -45,16 +45,13 @@ MUTED = "#607080"
 # ══════════════════════════════════════════════════════════════════
 st.markdown(f"""
 <style>
-  /* 全域背景 */
   .stApp, .main, [data-testid="stAppViewContainer"] {{
       background-color: {BG} !important;
       color: {TEXT} !important;
   }}
-  /* 頂部欄 & 側欄 */
   [data-testid="stHeader"], [data-testid="stSidebar"] {{
       background-color: {PANEL} !important;
   }}
-  /* 輸入元件 */
   .stTextInput input, .stNumberInput input {{
       background-color: {CARD} !important;
       border: 1px solid {BORD} !important;
@@ -62,7 +59,6 @@ st.markdown(f"""
       border-radius: 5px !important;
   }}
   .stSlider > div > div {{ background-color: {CYAN} !important; }}
-  /* 按鈕 */
   .stButton button {{
       background: linear-gradient(90deg, #0A1E38, #122840) !important;
       color: {CYAN} !important;
@@ -74,22 +70,20 @@ st.markdown(f"""
       background: linear-gradient(90deg, #122840, #1A3050) !important;
       color: #fff !important;
   }}
-  /* Checkbox */
   .stCheckbox label {{ color: {TEXT} !important; }}
-  /* plotly 圖 */
   .js-plotly-plot, .plotly-graph-div {{ background: transparent !important; }}
-  /* 隱藏 Streamlit 標誌 */
   #MainMenu, footer, [data-testid="stToolbar"] {{ visibility: hidden; }}
-  /* 欄位間距 */
   [data-testid="column"] {{ padding: 0 4px !important; }}
-  /* 卷軸 */
   ::-webkit-scrollbar {{ width: 5px; height: 5px; }}
   ::-webkit-scrollbar-track {{ background: {BG}; }}
   ::-webkit-scrollbar-thumb {{ background: {BORD}; border-radius: 3px; }}
-  /* label */
   label[data-testid="stWidgetLabel"] > p {{ color: {MUTED} !important; font-size: .78rem !important; }}
-  /* 分隔線 */
   hr {{ border-color: {BORD} !important; }}
+  /* sidebar */
+  [data-testid="stSidebar"] .stButton button {{
+      font-size: .75rem !important;
+      padding: 3px 8px !important;
+  }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -166,16 +160,16 @@ def fetch_all(ticker, days):
     d["MA5"]  = ma(d["Close"], 5)
     d["MA20"] = ma(d["Close"], 20)
     d["MA60"] = ma(d["Close"], 60)
-    d["K"], d["D"]             = kd(d)
+    d["K"], d["D"]                 = kd(d)
     d["MACD"], d["SIG"], d["HIST"] = macd(d["Close"])
-    d["RSI"]                   = rsi(d["Close"])
-    d["BBU"], d["BBM"], d["BBL"] = bb(d["Close"])
-    d["ATR"]                   = atr(d)
+    d["RSI"]                       = rsi(d["Close"])
+    d["BBU"], d["BBM"], d["BBL"]   = bb(d["Close"])
+    d["ATR"]                       = atr(d)
 
     w = get("1wk")
     if w is not None and len(w) >= 5:
-        w["MA5"], w["MA20"] = ma(w["Close"], 5), ma(w["Close"], 20)
-        w["K"], w["D"]      = kd(w)
+        w["MA5"], w["MA20"]            = ma(w["Close"], 5), ma(w["Close"], 20)
+        w["K"], w["D"]                 = kd(w)
         w["MACD"], w["SIG"], w["HIST"] = macd(w["Close"])
 
     mo = get("1mo")
@@ -184,6 +178,32 @@ def fetch_all(ticker, days):
         mo["K"], mo["D"] = kd(mo)
 
     return d, w, mo
+
+# ══════════════════════════════════════════════════════════════════
+#  三大法人資料
+# ══════════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_institutional(stock_id):
+    """抓取近日三大法人買賣超（TWSE OpenAPI）"""
+    try:
+        date_str = datetime.today().strftime("%Y%m%d")
+        url = (f"https://www.twse.com.tw/fund/T86"
+               f"?response=json&date={date_str}&selectType=ALLBUT0999")
+        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
+        data = resp.json()
+        for row in data.get("data", []):
+            if row[0] == stock_id:
+                def p(x):
+                    try: return int(x.replace(",","").replace(" ",""))
+                    except: return 0
+                foreign = p(row[4])
+                invest  = p(row[10])
+                dealer  = p(row[14])
+                return foreign, invest, dealer
+    except Exception:
+        pass
+    return None, None, None
 
 # ══════════════════════════════════════════════════════════════════
 #  輔助分析
@@ -208,7 +228,7 @@ def main_force(df, n=5):
     dn = r[r["Close"] <  r["Open"]]["Volume"].mean() or 0
     vt = r["Volume"].diff().mean()
     if up > dn * 1.3:
-        return "進出見買", "籌碼集中", "高", "穩定",    RED,  "多方偏強"
+        return "進出見買", "籌碼集中", "高", "穩定",   RED,  "多方偏強"
     if dn > up * 1.3:
         return "進出見賣", "籌碼分散", "低", "不穩定", GRN,  "空方偏強"
     txt = "中性偏多" if vt > 0 else "中性偏空"
@@ -222,7 +242,6 @@ def kline_patterns(df):
     lower  = min(float(r["Close"]), float(r["Open"])) - float(r["Low"])
     bull   = float(r["Close"]) >= float(r["Open"])
     br     = body / total
-
     out = []
     if br > 0.7:
         out.append(("長紅K" if bull else "長黑K", "多方型態" if bull else "空方型態", RED if bull else GRN))
@@ -260,7 +279,7 @@ def trend_label(df_tf, tf_name):
         return tf_name, "資料不足", MUTED, "—"
     r, p = df_tf.iloc[-1], df_tf.iloc[-2]
     chg  = (float(r["Close"]) - float(p["Close"])) / float(p["Close"]) * 100
-    kv   = float(r.get("K", 50)) if "K" in df_tf.columns else 50
+    kv   = float(r.get("K", 50))   if "K"    in df_tf.columns else 50
     mv   = float(r.get("MACD", 0)) if "MACD" in df_tf.columns else 0
     sv   = float(r.get("SIG",  0)) if "SIG"  in df_tf.columns else 0
     ma5v = float(r.get("MA5", float(r["Close"]))) if "MA5" in df_tf.columns else float(r["Close"])
@@ -271,15 +290,177 @@ def trend_label(df_tf, tf_name):
     return tf_name, f"{trend} ({chg:+.1f}%)", col, f"KD:{kd_s} MACD:{ma_s}交叉"
 
 # ══════════════════════════════════════════════════════════════════
+#  警示系統
+# ══════════════════════════════════════════════════════════════════
+
+def check_alerts(df, close, kv, dv, rv, mv, sv):
+    alerts = []
+    if len(df) < 3:
+        return alerts
+
+    prev_k = float(df.iloc[-2]["K"]) if "K" in df.columns else 50
+    prev_d = float(df.iloc[-2]["D"]) if "D" in df.columns else 50
+
+    # KD 交叉
+    if prev_k < prev_d and kv > dv:
+        alerts.append(("🟢 KD黃金交叉", "買進訊號", GRN))
+    if prev_k > prev_d and kv < dv:
+        alerts.append(("🔴 KD死亡交叉", "賣出訊號", RED))
+
+    # RSI 極值
+    if rv > 80:
+        alerts.append(("⚠️ RSI超買", f"RSI={rv:.1f}，注意拉回", RED))
+    elif rv < 20:
+        alerts.append(("✅ RSI超賣", f"RSI={rv:.1f}，留意反彈", GRN))
+
+    # 布林通道突破
+    if "BBU" in df.columns and "BBL" in df.columns:
+        bbu = float(df.iloc[-1]["BBU"])
+        bbl = float(df.iloc[-1]["BBL"])
+        if close > bbu:
+            alerts.append(("📈 突破布林上軌", f"{close:.0f} > {bbu:.0f}", RED))
+        if close < bbl:
+            alerts.append(("📉 跌破布林下軌", f"{close:.0f} < {bbl:.0f}", GRN))
+
+    # MACD 交叉
+    prev_m = float(df.iloc[-2]["MACD"]) if "MACD" in df.columns else 0
+    prev_s = float(df.iloc[-2]["SIG"])  if "SIG"  in df.columns else 0
+    if prev_m < prev_s and mv > sv:
+        alerts.append(("📈 MACD黃金交叉", "DIF上穿DEA", RED))
+    if prev_m > prev_s and mv < sv:
+        alerts.append(("📉 MACD死亡交叉", "DIF下穿DEA", GRN))
+
+    # 均量比放量
+    vol   = float(df.iloc[-1]["Volume"])
+    avg5  = float(df["Volume"].tail(5).mean())
+    if avg5 > 0 and vol / avg5 > 2.0:
+        alerts.append(("🔥 爆量訊號", f"量能 {vol/avg5:.1f}x 均量", ORNG))
+
+    return alerts
+
+# ══════════════════════════════════════════════════════════════════
+#  費波那契回撤
+# ══════════════════════════════════════════════════════════════════
+
+def fibonacci_levels(df, n=60):
+    r    = df.tail(n)
+    hi   = float(r["High"].max())
+    lo   = float(r["Low"].min())
+    diff = hi - lo
+    return {
+        "0.0% (高點)":  hi,
+        "23.6%":        hi - diff * 0.236,
+        "38.2%":        hi - diff * 0.382,
+        "50.0%":        hi - diff * 0.500,
+        "61.8%":        hi - diff * 0.618,
+        "100% (低點)":  lo,
+    }
+
+# ══════════════════════════════════════════════════════════════════
+#  AI 訊號評分
+# ══════════════════════════════════════════════════════════════════
+
+def ai_summary(close, ma5, ma20, ma60, kv, dv, rv, mv, sv, hv, atr_v):
+    signals = []
+
+    if ma5 > ma20 > ma60:
+        signals.append(("多", "均線多頭排列"))
+    elif ma5 < ma20 < ma60:
+        signals.append(("空", "均線空頭排列"))
+
+    if kv > 80:
+        signals.append(("空", "KD高檔鈍化注意"))
+    elif kv < 20:
+        signals.append(("多", "KD低檔超賣反彈"))
+
+    if rv < 30:
+        signals.append(("多", "RSI超賣反彈機會"))
+    elif rv > 70:
+        signals.append(("空", "RSI超買注意拉回"))
+
+    if mv > sv and hv > 0:
+        signals.append(("多", "MACD黃金交叉擴張"))
+    elif mv < sv and hv < 0:
+        signals.append(("空", "MACD死亡交叉擴張"))
+
+    if close > ma20:
+        signals.append(("多", "站上MA20"))
+    else:
+        signals.append(("空", "跌破MA20"))
+
+    bull  = sum(1 for s, _ in signals if s == "多")
+    total = len(signals) if signals else 1
+    score = int(bull / total * 100)
+
+    at = atr_v if atr_v and not math.isnan(atr_v) else close * 0.025
+
+    if score >= 70:
+        verdict = "📈 偏多操作，可考慮布局"
+        stop    = close - at * 1.5
+        target  = close + at * 2.5
+        col     = RED
+    elif score <= 30:
+        verdict = "📉 偏空操作，謹慎持股"
+        stop    = close + at * 1.0
+        target  = close - at * 2.0
+        col     = GRN
+    else:
+        verdict = "⚖️ 中性觀望，等待訊號明朗"
+        stop    = close - at
+        target  = close + at
+        col     = GOLD
+
+    return verdict, score, signals, stop, target, col
+
+# ══════════════════════════════════════════════════════════════════
+#  匯出工具
+# ══════════════════════════════════════════════════════════════════
+
+def export_csv(df):
+    buf = io.StringIO()
+    df.to_csv(buf, index=False, encoding="utf-8-sig")
+    return buf.getvalue().encode("utf-8-sig")
+
+def export_summary(ticker, name, close, pct, kv, rv, mv, sv,
+                   verdict, score, signals, stop, target):
+    lines = [
+        f"{'='*45}",
+        f"  {name}（{ticker}）技術分析報告",
+        f"{'='*45}",
+        f"日期　　：{datetime.today().strftime('%Y-%m-%d %H:%M')}",
+        f"收盤價　：{close:,.2f}　漲跌：{pct:+.2f}%",
+        f"KD　　　：{kv:.1f}　RSI：{rv:.1f}",
+        f"MACD　　：{'黃金交叉' if mv > sv else '死亡交叉'}",
+        f"",
+        f"【AI 訊號評分】{score}/100",
+        f"建議　　：{verdict}",
+        f"目標價　：{target:,.2f}",
+        f"停損價　：{stop:,.2f}",
+        f"",
+        f"【訊號明細】",
+    ]
+    for s, desc in signals:
+        lines.append(f"  {'▲' if s=='多' else '▼'} {desc}")
+    lines += [
+        f"",
+        f"{'─'*45}",
+        f"⚠ 本報告僅供學習與研究，不構成投資建議。",
+        f"  投資有風險，操作請審慎。",
+        f"{'─'*45}",
+    ]
+    return "\n".join(lines)
+
+# ══════════════════════════════════════════════════════════════════
 #  Plotly 圖表
 # ══════════════════════════════════════════════════════════════════
 
-def build_main(df, show_bb):
+def build_main(df, show_bb, show_fib):
     fig = make_subplots(
         rows=3, cols=1, shared_xaxes=True,
         row_heights=[0.60, 0.20, 0.20],
         vertical_spacing=0.01,
     )
+
     # K 線
     fig.add_trace(go.Candlestick(
         x=df["Date"], open=df["Open"], high=df["High"],
@@ -300,6 +481,28 @@ def build_main(df, show_bb):
             mode="lines", line=dict(color="rgba(160,80,255,.7)", width=1, dash="dot"),
             fill="tonexty", fillcolor="rgba(160,80,255,.06)"), row=1, col=1)
 
+    # 費波那契水平線
+    if show_fib:
+        fib_colors = {
+            "0.0% (高點)":  "rgba(255,48,48,0.6)",
+            "23.6%":        "rgba(255,215,0,0.5)",
+            "38.2%":        "rgba(0,200,100,0.6)",
+            "50.0%":        "rgba(0,200,255,0.6)",
+            "61.8%":        "rgba(0,200,100,0.6)",
+            "100% (低點)":  "rgba(0,200,100,0.6)",
+        }
+        for label, price in fibonacci_levels(df).items():
+            fig.add_hline(
+                y=price, line_dash="dash",
+                line_color=fib_colors.get(label, "rgba(255,215,0,0.4)"),
+                line_width=1,
+                annotation_text=f" Fib {label} {price:.0f}",
+                annotation_font=dict(size=8, color=MUTED),
+                annotation_position="right",
+                row=1, col=1,
+            )
+
+    # 近高近低標註
     hi_i = int(df["High"].idxmax())
     lo_i = int(df["Low"].idxmin())
     fig.add_annotation(
@@ -315,12 +518,14 @@ def build_main(df, show_bb):
         font=dict(color=GRN, size=9), bgcolor="rgba(0,200,100,.15)",
         bordercolor=GRN, borderwidth=1, row=1, col=1)
 
+    # 成交量
     bar_c = [RED if c >= o else GRN for c, o in zip(df["Close"], df["Open"])]
     fig.add_trace(go.Bar(x=df["Date"], y=df["Volume"], name="量",
         marker_color=bar_c, opacity=0.75), row=2, col=1)
     fig.add_trace(go.Scatter(x=df["Date"], y=df["Volume"].rolling(5).mean(),
         name="均量", mode="lines", line=dict(color=GOLD, width=1.1)), row=2, col=1)
 
+    # KD
     fig.add_trace(go.Scatter(x=df["Date"], y=df["K"], name="K",
         mode="lines", line=dict(color=GOLD, width=1.3)), row=3, col=1)
     fig.add_trace(go.Scatter(x=df["Date"], y=df["D"], name="D",
@@ -397,6 +602,48 @@ def build_macd(df):
         xaxis=dict(gridcolor="#142030", zeroline=False),
         yaxis=dict(gridcolor="#142030", zeroline=False),
         hovermode="x unified",
+    )
+    return fig
+
+
+def build_ai_score_chart(score, signals):
+    """AI 評分雷達圖"""
+    categories = ["均線", "KD", "RSI", "MACD", "量價"]
+    # 從 signals 對應分數
+    keyword_map = {
+        "均線": ["均線多頭", "均線空頭"],
+        "KD":   ["KD低檔", "KD高檔"],
+        "RSI":  ["RSI超賣", "RSI超買"],
+        "MACD": ["MACD黃金", "MACD死亡"],
+        "量價": ["站上MA20", "跌破MA20"],
+    }
+    vals = []
+    for cat, keys in keyword_map.items():
+        matched = [s for s, d in signals if any(k in d for k in keys)]
+        if matched:
+            vals.append(80 if matched[0] == "多" else 20)
+        else:
+            vals.append(50)
+    vals += vals[:1]
+    cats  = categories + categories[:1]
+
+    fig = go.Figure(go.Scatterpolar(
+        r=vals, theta=cats, fill="toself",
+        fillcolor=f"rgba(0,200,255,0.15)",
+        line=dict(color=CYAN, width=1.5),
+        name="技術評分",
+    ))
+    fig.update_layout(
+        polar=dict(
+            bgcolor=BG,
+            radialaxis=dict(visible=True, range=[0,100],
+                            gridcolor=BORD, tickfont=dict(size=8, color=MUTED)),
+            angularaxis=dict(gridcolor=BORD, tickfont=dict(size=9, color=TEXT)),
+        ),
+        paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+        height=220, margin=dict(l=20, r=20, t=20, b=20),
+        showlegend=False,
+        font=dict(family="Arial", color=TEXT),
     )
     return fig
 
@@ -503,7 +750,10 @@ def html_tech(df, ma5, ma20, ma60, kv, dv, rv, mv, sv, hv):
 def html_industry(sector, industry):
     items = ["半導體設備備貨積極", "受惠先進製程擴產需求",
              "產業景氣維持高檔",   "設備廠表現相對強勢"]
-    rows = "".join(f'<div style="color:{MUTED};font-size:.71rem;padding:2px 0;">• {i}</div>' for i in items)
+    rows = "".join(
+        f'<div style="color:{MUTED};font-size:.71rem;padding:2px 0;">• {i}</div>'
+        for i in items
+    )
     return box(
         f'<div style="color:{CYAN};font-size:.74rem;margin-bottom:5px;">{sector} / {industry}</div>{rows}',
         "產業概況", "◈"
@@ -515,7 +765,10 @@ def html_company(name, pe, mktcap):
     mc_s = f"{mktcap/1e8:,.0f} 億" if mktcap else "—"
     items = [f"本益比：{pe_s}", f"市值：{mc_s}",
              "技術領先，毛利率佳", "訂單能見度高", "營運成長動能強勁"]
-    rows = "".join(f'<div style="color:{MUTED};font-size:.71rem;padding:2px 0;">• {i}</div>' for i in items)
+    rows = "".join(
+        f'<div style="color:{MUTED};font-size:.71rem;padding:2px 0;">• {i}</div>'
+        for i in items
+    )
     return box(rows, "公司概況", "◇")
 
 
@@ -647,32 +900,50 @@ def html_vol_price(df):
     vp   = ("量增價漲 ✓" if up and vr5>1 else "量縮價跌" if not up and vr5<1 else "量價背離 ⚠")
     vpc  = RED if "漲" in vp else (GRN if "跌" in vp else GOLD)
     return box("".join([
-        row_item("量價關係",    vp,                  vpc),
-        row_item("均量比(5日)", f"{vr5:.2f}x",   RED if vr5>1.2 else (GRN if vr5<0.8 else GOLD)),
-        row_item("均量比(20日)",f"{vr20:.2f}x",  RED if vr20>1.2 else (GRN if vr20<0.8 else GOLD)),
-        row_item("距MA20",      f"{(cl-m20)/cl*100:+.1f}%" if m20 else "—",
+        row_item("量價關係",     vp,               vpc),
+        row_item("均量比(5日)",  f"{vr5:.2f}x",    RED if vr5>1.2 else (GRN if vr5<0.8 else GOLD)),
+        row_item("均量比(20日)", f"{vr20:.2f}x",   RED if vr20>1.2 else (GRN if vr20<0.8 else GOLD)),
+        row_item("距MA20",       f"{(cl-m20)/cl*100:+.1f}%" if m20 else "—",
                  RED if cl > m20 else GRN),
-        row_item("距MA60",      f"{(cl-m60)/cl*100:+.1f}%" if m60 else "—",
+        row_item("距MA60",       f"{(cl-m60)/cl*100:+.1f}%" if m60 else "—",
                  RED if cl > m60 else GRN),
     ]), "量價結構分析", "◈")
 
 
-def html_chip(df, mf_status, chip_c, chip_s, mf_col):
+def html_chip(df, mf_status, chip_c, chip_s, mf_col,
+              foreign=None, invest=None, dealer=None):
     cl  = float(df.iloc[-1]["Close"])
     m20 = float(df["MA20"].iloc[-1]) if "MA20" in df.columns else 0
     m60 = float(df["MA60"].iloc[-1]) if "MA60" in df.columns else 0
     pos = "多方主導" if cl > m20 > m60 else ("空方主導" if cl < m20 < m60 else "均線糾結")
     pc  = RED if "多" in pos else (GRN if "空" in pos else GOLD)
-    return box("".join([
+
+    rows = [
         row_item("主力動向",   mf_status,   mf_col),
         row_item("籌碼集中度", f"{chip_c}", mf_col),
         row_item("籌碼穩定度", f"{chip_s}", mf_col),
         row_item("多空主導",   pos,         pc),
-        row_item("MA20站穩", "是 ✓" if cl > m20 else "否 ✗",
+        row_item("MA20站穩",   "是 ✓" if cl > m20 else "否 ✗",
                  RED if cl > m20 else GRN),
-        row_item("主力進出", "進出見買" if mf_status in ["進出見買","中性偏多"] else "進出見賣",
+        row_item("主力進出",   "進出見買" if mf_status in ["進出見買","中性偏多"] else "進出見賣",
                  RED if mf_status in ["進出見買","中性偏多"] else GRN),
-    ]), "籌碼結構分析", "◈")
+    ]
+
+    # 三大法人（若有資料）
+    if foreign is not None:
+        def fmt(v):
+            if v is None: return "—"
+            return f"+{v:,}" if v >= 0 else f"{v:,}"
+        fc = RED if (foreign or 0) >= 0 else GRN
+        ic = RED if (invest  or 0) >= 0 else GRN
+        dc = RED if (dealer  or 0) >= 0 else GRN
+        rows += [
+            row_item("外資買賣超", fmt(foreign), fc),
+            row_item("投信買賣超", fmt(invest),  ic),
+            row_item("自營商買賣超", fmt(dealer), dc),
+        ]
+
+    return box("".join(rows), "籌碼結構分析", "◈")
 
 
 def html_day_script(df, close, atr_v):
@@ -711,233 +982,25 @@ def html_rsi_bar(rsi_val):
         + bar
     )
 
-# ══════════════════════════════════════════════════════════════════
-#  主頁面
-# ══════════════════════════════════════════════════════════════════
 
-def build_header_html(ticker, name, close, chg, pct, vol, mktcap, pe,
-                      ma5, ma20, ma60, kv, dv, rv, mv, sv,
-                      ip, ep, iv, ev, date_s):
-    cc  = RED  if chg >= 0 else GRN
-    sym = "▲"  if chg >= 0 else "▼"
-    mktcap_s = f"{mktcap/1e8:,.0f} 億" if mktcap else "—"
-    pe_s     = f"{pe:.1f}" if pe else "—"
-
-    return f"""
-    <div style="background:linear-gradient(90deg,#05080F,#0B1528,#05080F);
-                border:1px solid {BORD};border-radius:8px;
-                padding:10px 16px;font-family:Arial,sans-serif;margin-bottom:6px;">
-      <div style="display:flex;align-items:center;flex-wrap:wrap;gap:14px;">
-        <div>
-          <span style="color:#8090A0;font-size:.78rem;">{ticker.replace('.TW','')}</span>
-          <span style="color:#E0EAF4;font-size:.82rem;font-weight:700;margin-left:5px;">{name}</span>
-        </div>
-        <div style="display:flex;align-items:baseline;gap:9px;">
-          <span style="color:{cc};font-size:2.2rem;font-weight:900;letter-spacing:1px;line-height:1;">
-            {close:,.2f}
-          </span>
-          <span style="color:{cc};font-size:.94rem;font-weight:700;">
-            {sym} {abs(chg):.2f}（{abs(pct):.2f}%）
-          </span>
-        </div>
-        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-left:auto;">
-          {''.join(
-            f'<div style="text-align:center;background:{CARD};border-radius:4px;padding:4px 10px;">'
-            f'<div style="color:{MUTED};font-size:.6rem;">{lb}</div>'
-            f'<div style="color:{vc};font-size:.8rem;font-weight:700;">{vl}</div></div>'
-            for lb, vl, vc in [
-                ("成交量",   f"{vol:,}",       TEXT),
-                ("日期",     date_s,           TEXT),
-                ("市值",     mktcap_s,         TEXT),
-                ("本益比",   pe_s,             TEXT),
-                ("內盤",     f"{iv:,} ({ip}%)", GRN),
-                ("外盤",     f"{ev:,} ({ep}%)", RED),
-                ("內外盤比", f"{ip}:{ep}",     CYAN),
-            ])}
-        </div>
-      </div>
-      <div style="display:flex;gap:14px;margin-top:6px;flex-wrap:wrap;">
-        <span style="color:{MUTED};font-size:.68rem;">日K線圖</span>
-        <span style="color:{GOLD};font-size:.7rem;">MA5 {ma5:,.2f}</span>
-        <span style="color:{ORNG};font-size:.7rem;">MA20 {ma20:,.2f}</span>
-        <span style="color:{CYAN};font-size:.7rem;">MA60 {ma60:,.2f}</span>
-        <span style="color:{MUTED};font-size:.7rem;">KD {kv:.0f}/{dv:.0f}</span>
-        <span style="color:{MUTED};font-size:.7rem;">RSI {rv:.0f}</span>
-        <span style="color:{RED if mv>sv else GRN};font-size:.7rem;">
-          MACD {'黃金↑' if mv>sv else '死亡↓'}
-        </span>
-      </div>
-    </div>"""
-
-
-def main():
-    # ── Banner ────────────────────────────────────────────────────
-    st.markdown(f"""
-    <div style="background:linear-gradient(90deg,#05080F,#0C1828,#05080F);
-                border-bottom:2px solid {CYAN};padding:10px 16px;margin-bottom:8px;
-                border-radius:8px;display:flex;align-items:center;gap:12px;">
-      <span style="font-size:1.6rem;">📈</span>
-      <div>
-        <h1 style="color:#E0EAF4;margin:0;font-size:1.1rem;font-weight:900;letter-spacing:1px;">
-          台股技術分析儀表板
-        </h1>
-        <p style="color:{MUTED};margin:2px 0 0;font-size:.72rem;">
-          K線 · 均線 · KD · MACD · RSI · 布林通道 · 關鍵價位 · 籌碼 · 日操作劇本
-        </p>
-      </div>
-    </div>""", unsafe_allow_html=True)
-
-    # ── 控制列 ────────────────────────────────────────────────────
-    c1, c2, c3, c4 = st.columns([3, 3, 2, 2])
-    with c1:
-        ticker_input = st.text_input(
-            "股票代號",
-            value=st.session_state.get("ticker", "2330.TW"),
-            placeholder="2330 / 2330.TW / TSLA",
-            help="台股加 .TW，如 2330.TW",
+def html_alerts(alerts):
+    if not alerts:
+        return box(
+            f'<div style="color:{MUTED};font-size:.73rem;text-align:center;padding:6px 0;">'
+            f'✅ 目前無觸發警示</div>',
+            "即時警示", "🔔"
         )
-    with c2:
-        period_days = st.slider("查詢天數", min_value=30, max_value=365,
-                                value=st.session_state.get("period", 90), step=15)
-    with c3:
-        show_bb = st.checkbox("顯示布林通道",
-                              value=st.session_state.get("show_bb", False))
-    with c4:
-        st.markdown("<br>", unsafe_allow_html=True)
-        query_btn = st.button("🔍 查詢分析", use_container_width=True)
-
-    # 儲存狀態
-    st.session_state["ticker"]  = ticker_input
-    st.session_state["period"]  = period_days
-    st.session_state["show_bb"] = show_bb
-
-    # 自動首次載入 或 按鈕觸發
-    if "loaded" not in st.session_state or query_btn:
-        st.session_state["loaded"] = True
-
-    if not st.session_state.get("loaded"):
-        return
-
-    ticker = ticker_input.strip()
-    if not ticker:
-        st.error("請輸入股票代號")
-        return
-    if "." not in ticker:
-        ticker += ".TW"
-
-    with st.spinner(f"正在抓取 {ticker} 資料…"):
-        daily, weekly, monthly = fetch_all(ticker, period_days)
-
-    if daily is None or daily.empty:
-        st.error(f"❌ 無法取得 {ticker}，請確認代號或網路。")
-        return
-
-    daily = daily.tail(int(period_days)).reset_index(drop=True)
-    if len(daily) < 3:
-        st.error("資料筆數不足，請增加查詢天數。")
-        return
-
-    # 公司資訊
-    try:
-        info     = yf.Ticker(ticker).info
-        name     = info.get("longName", info.get("shortName", ticker))
-        sector   = info.get("sector",   "科技")
-        industry = info.get("industry", "半導體")
-        pe       = info.get("trailingPE", None)
-        mktcap   = info.get("marketCap",  None)
-    except Exception:
-        name = ticker; sector = industry = "—"; pe = mktcap = None
-
-    # 最新值
-    r, p  = daily.iloc[-1], daily.iloc[-2]
-    s     = lambda x: float(x) if not (isinstance(x, float) and math.isnan(x)) else 0.0
-    close = s(r["Close"]);  prev_c = s(p["Close"])
-    chg   = close - prev_c; pct    = chg / prev_c * 100
-    vol   = int(r["Volume"])
-    ma5   = s(r.get("MA5",  0))
-    ma20  = s(r.get("MA20", 0))
-    ma60  = s(r.get("MA60", 0))
-    kv    = s(r.get("K",   50))
-    dv    = s(r.get("D",   50))
-    rv    = s(r.get("RSI", 50))
-    mv    = s(r.get("MACD", 0))
-    sv    = s(r.get("SIG",  0))
-    hv    = s(r.get("HIST", 0))
-    atr_v = s(r.get("ATR",  close * 0.02))
-
-    ip, ep     = board_ratio(daily)
-    iv, ev     = int(vol * ip / 100), int(vol * ep / 100)
-    wr         = win_rate(daily)
-    mf_stat, mf_trend, chip_c, chip_s, mf_col, mf_cc = main_force(daily)
-    kp         = kline_patterns(daily)
-    cp         = chart_patterns(daily)
-    date_s     = (r["Date"].strftime("%m/%d") if hasattr(r["Date"], "strftime") else str(r["Date"]))
-
-    # ── 標頭 ─────────────────────────────────────────────────────
-    st.markdown(build_header_html(
-        ticker, name, close, chg, pct, vol, mktcap, pe,
-        ma5, ma20, ma60, kv, dv, rv, mv, sv,
-        ip, ep, iv, ev, date_s
-    ), unsafe_allow_html=True)
-
-    # ── 主體四欄 ─────────────────────────────────────────────────
-    col_left, col_mid, col_right, col_far = st.columns([42, 20, 20, 20])
-
-    with col_left:
-        st.plotly_chart(build_main(daily, show_bb),
-                        use_container_width=True, config={"displayModeBar": False})
-        st.markdown(html_ohlcv(daily) + html_rsi_bar(rv), unsafe_allow_html=True)
-        st.plotly_chart(build_macd(daily),
-                        use_container_width=True, config={"displayModeBar": False})
-
-    with col_mid:
-        st.markdown(html_main_force(mf_stat, mf_trend, mf_cc,
-                                    chip_c, chip_s, mf_col, daily),
-                    unsafe_allow_html=True)
-        # 勝率 gauge
-        st.markdown(f"""
-        <div style="color:{CYAN};font-size:.76rem;font-weight:700;
-             padding:3px 0 5px;border-bottom:1px solid {BORD};margin-bottom:4px;
-             font-family:Arial,sans-serif;">
-          ⚡ 短線勝率（近10日）
-        </div>""", unsafe_allow_html=True)
-        st.plotly_chart(build_gauge(wr),
-                        use_container_width=True, config={"displayModeBar": False})
-        st.markdown(html_key_levels(daily, close), unsafe_allow_html=True)
-
-    with col_right:
-        st.markdown(
-            html_tech(daily, ma5, ma20, ma60, kv, dv, rv, mv, sv, hv) +
-            html_industry(sector, industry) +
-            html_company(name, pe, mktcap) +
-            html_board(ip, ep, iv, ev),
-            unsafe_allow_html=True
-        )
-
-    with col_far:
-        st.markdown(
-            html_vol_price(daily) +
-            html_chip(daily, mf_stat, chip_c, chip_s, mf_col) +
-            html_day_script(daily, close, atr_v),
-            unsafe_allow_html=True
-        )
-
-    # ── 底部列：K線型態 ＋ 多週期分析 ────────────────────────────
-    bot1, bot2 = st.columns([1, 1])
-    with bot1:
-        st.markdown(html_kline_patterns(kp, cp), unsafe_allow_html=True)
-    with bot2:
-        st.markdown(html_multiperiod(daily, weekly, monthly), unsafe_allow_html=True)
-
-    # ── 免責聲明 ──────────────────────────────────────────────────
-    st.markdown(f"""
-    <div style="background:{CARD};border:1px solid {BORD};border-radius:5px;
-                padding:6px 12px;margin-top:4px;text-align:center;">
-      <span style="color:{MUTED};font-size:.7rem;">
-        ⚠ 資料來源：Yahoo Finance｜本儀表板僅供學習與研究，不構成投資建議。投資有風險，操作請審慎。
-      </span>
-    </div>""", unsafe_allow_html=True)
+    rows = "".join(
+        f'<div style="background:{BG};border-radius:4px;padding:5px 9px;margin:3px 0;'
+        f'border-left:3px solid {c};">'
+        f'<div style="color:{c};font-size:.76rem;font-weight:700;">{msg}</div>'
+        f'<div style="color:{MUTED};font-size:.68rem;">{detail}</div></div>'
+        for msg, detail, c in alerts
+    )
+    return box(rows, f"即時警示（{len(alerts)} 項）", "🔔")
 
 
-if __name__ == "__main__":
-    main()
+def html_ai_summary(verdict, score, signals, stop, target, col):
+    score_bar = (
+        f'<div style="background:{BG};border-radius:3px;overflow:hidden;height:8px;margin:5px 0;">'
+        f'<div style="background:{col};height:100
